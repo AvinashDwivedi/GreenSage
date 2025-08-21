@@ -38,14 +38,64 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 const vscode = __importStar(require("vscode"));
 const node_fetch_1 = __importDefault(require("node-fetch"));
 const dotenv = __importStar(require("dotenv"));
 dotenv.config({ path: __dirname + '/../.env' });
+let suggestionPanel = null;
+// Store selection metadata globally
+let lastSelection = null;
+function getLoadingView() {
+    return `<!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <style>
+        body { font-family: sans-serif; padding: 2rem; color: #444; }
+        .spinner {
+          margin-top: 2rem;
+          width: 40px;
+          height: 40px;
+          border: 5px solid #ccc;
+          border-top-color: #007acc;
+          border-radius: 50%;
+          animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+      </style>
+    </head>
+    <body>
+      <h2>🔍 Analyzing Selected Code...</h2>
+      <div class="spinner"></div>
+    </body>
+    </html>`;
+}
+function updateSuggestionPanel(suggestion, selectedText, context) {
+    if (!suggestionPanel)
+        return;
+    suggestionPanel.webview.html = getWebviewContentWithReplace(suggestion);
+    suggestionPanel.webview.onDidReceiveMessage(async (message) => {
+        if (message.command === 'replace') {
+            if (!lastSelection) {
+                vscode.window.showErrorMessage('No original selection stored to replace.');
+                return;
+            }
+            const { uri, range } = lastSelection;
+            const document = await vscode.workspace.openTextDocument(uri);
+            const editor = await vscode.window.showTextDocument(document, {
+                preview: false,
+                preserveFocus: false
+            });
+            editor.edit(editBuilder => {
+                editBuilder.replace(range, suggestion.suggested_code);
+            });
+        }
+    });
+}
 function activate(context) {
-    const disposable = vscode.commands.registerCommand('greencode.analyzeSelectedCode', async () => {
+    const analyzeDisposable = vscode.commands.registerCommand('greencode.analyzeSelectedCode', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor)
             return;
@@ -55,67 +105,22 @@ function activate(context) {
             vscode.window.showWarningMessage('No code selected.');
             return;
         }
-        vscode.window.showInformationMessage('Analyzing selected code...');
-        const suggestions = await analyzeWithOpenAI(selectedText);
-        const suggestionObj = await analyzeWithOpenAI(selectedText);
-        showSuggestionPanelWithReplace(context, suggestionObj, selectedText);
+        lastSelection = {
+            uri: editor.document.uri,
+            range: new vscode.Range(selection.start, selection.end)
+        };
+        // Step 1: Show panel immediately
+        suggestionPanel = vscode.window.createWebviewPanel('greensageSuggestions', 'Green Suggestions', vscode.ViewColumn.Beside, {
+            enableScripts: true,
+            retainContextWhenHidden: true
+        });
+        suggestionPanel.webview.html = getLoadingView(); // show analyzing...
+        // Step 2: Get suggestion from OpenAI
+        const suggestion = await analyzeWithOpenAI(selectedText);
+        // Step 3: Update the panel with suggestions
+        updateSuggestionPanel(suggestion, selectedText, context);
     });
-    context.subscriptions.push(disposable);
-}
-function getWebviewContentWithReplace(data) {
-    return `<!DOCTYPE html>
-			<html lang="en">
-			<head>
-			<meta charset="UTF-8">
-			<style>
-				body {
-				font-family: sans-serif;
-				padding: 1rem;
-				}
-				pre {
-				background: #f5f5f5;
-				padding: 1rem;
-				overflow-x: auto;
-				}
-				button {
-				background-color: #007acc;
-				color: white;
-				border: none;
-				padding: 0.5rem 1rem;
-				margin-top: 1rem;
-				cursor: pointer;
-				border-radius: 4px;
-				}
-				h2 { margin-top: 2rem; }
-			</style>
-			</head>
-			<body>
-			<h2>🌱 Reason</h2>
-			<p>${data.reason}</p>
-
-			<h2>🧾 Original Code</h2>
-			<pre>${escapeHtml(data.original_code)}</pre>
-
-			<h2>✅ Suggested Code</h2>
-			<pre>${escapeHtml(data.suggested_code)}</pre>
-
-			<button onclick="replaceInEditor()">Replace in Editor</button>
-
-			<script>
-				const vscode = acquireVsCodeApi();
-				function replaceInEditor() {
-				vscode.postMessage({ command: 'replace' });
-				}
-			</script>
-			</body>
-			</html>`;
-}
-function escapeHtml(text) {
-    return text
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
+    context.subscriptions.push(analyzeDisposable);
 }
 function showSuggestionPanelWithReplace(context, suggestion, selectedText) {
     const panel = vscode.window.createWebviewPanel('greensageSuggestions', 'Green Suggestions', vscode.ViewColumn.Beside, {
@@ -125,36 +130,90 @@ function showSuggestionPanelWithReplace(context, suggestion, selectedText) {
     panel.webview.html = getWebviewContentWithReplace(suggestion);
     panel.webview.onDidReceiveMessage(async (message) => {
         if (message.command === 'replace') {
-            const editor = vscode.window.activeTextEditor;
-            if (!editor)
+            if (!lastSelection) {
+                vscode.window.showErrorMessage('No original selection stored to replace.');
                 return;
+            }
+            const { uri, range } = lastSelection;
+            const document = await vscode.workspace.openTextDocument(uri);
+            const editor = await vscode.window.showTextDocument(document, {
+                preview: false,
+                preserveFocus: false
+            });
             editor.edit(editBuilder => {
-                const selection = editor.selection;
-                editBuilder.replace(selection, suggestion.suggested_code);
+                editBuilder.replace(range, suggestion.suggested_code);
             });
         }
     });
 }
+function getWebviewContentWithReplace(data) {
+    return `<!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <style>
+        body { font-family: sans-serif; padding: 1rem; }
+        pre { background: #f5f5f5; padding: 1rem; overflow-x: auto; }
+        button {
+          background-color: #007acc; color: white;
+          border: none; padding: 0.5rem 1rem;
+          margin-top: 1rem; cursor: pointer; border-radius: 4px;
+        }
+        h2 { margin-top: 2rem; }
+      </style>
+    </head>
+    <body>
+      <h2>🌱 Reason</h2>
+      <p>${data.reason}</p>
+
+      <h2>🧾 Original Code</h2>
+      <pre>${escapeHtml(data.original_code)}</pre>
+
+      <h2>✅ Suggested Code</h2>
+      <pre>${escapeHtml(data.suggested_code)}</pre>
+
+      <button onclick="replaceInEditor()">Replace in Editor</button>
+
+      <script>
+        const vscode = acquireVsCodeApi();
+        function replaceInEditor() {
+          vscode.postMessage({ command: 'replace' });
+        }
+      </script>
+    </body>
+    </html>`;
+}
+function escapeHtml(text) {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
 async function analyzeWithOpenAI(code) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-        return '❌ OpenAI API key not found. Make sure to define it in a .env file.';
+        return {
+            original_code: code,
+            suggested_code: code,
+            reason: '❌ OpenAI API key not found. Make sure to define it in a .env file.'
+        };
     }
-    const response = await (0, node_fetch_1.default)("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
+    const response = await (0, node_fetch_1.default)('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
         headers: {
-            "Authorization": `Bearer ${apiKey}`,
-            "Content-Type": "application/json"
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            model: "gpt-4",
+            model: 'gpt-4',
             messages: [
                 {
-                    role: "system",
+                    role: 'system',
                     content: "You're a sustainable coding assistant. Reply only in JSON format containing keys: original_code, suggested_code, and reason. No explanation outside the JSON object."
                 },
                 {
-                    role: "user",
+                    role: 'user',
                     content: `Analyze the following code for sustainability and suggest improvements. Return a JSON object:\n\n${code}`
                 }
             ],
@@ -162,7 +221,11 @@ async function analyzeWithOpenAI(code) {
         })
     });
     if (!response.ok) {
-        return `❌ OpenAI Error: ${response.statusText}`;
+        return {
+            original_code: code,
+            suggested_code: code,
+            reason: `❌ OpenAI Error: ${response.statusText}`
+        };
     }
     const data = await response.json();
     const raw = data.choices?.[0]?.message?.content || '{}';
@@ -174,11 +237,10 @@ async function analyzeWithOpenAI(code) {
         parsed = {
             original_code: code,
             suggested_code: code,
-            reason: "⚠️ Could not parse AI response as JSON. Check prompt or model output."
+            reason: '⚠️ Could not parse AI response as JSON. Check prompt or model output.'
         };
     }
     return parsed;
 }
-// This method is called when your extension is deactivated
 function deactivate() { }
 //# sourceMappingURL=extension.js.map
