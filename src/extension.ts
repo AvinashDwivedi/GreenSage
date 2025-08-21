@@ -6,7 +6,6 @@ dotenv.config({ path: __dirname + '/../.env' });
 
 let suggestionPanel: vscode.WebviewPanel | null = null;
 
-// Store selection metadata globally
 let lastSelection: {
   uri: vscode.Uri;
   range: vscode.Range;
@@ -25,7 +24,6 @@ function getLoadingView(): string {
 			justify-content: center;
 			align-items: center;
 			font-family: sans-serif;
-			background-color: #ffffff;
 			}
 
 			.loading-container {
@@ -36,8 +34,8 @@ function getLoadingView(): string {
 			margin: 0 auto 20px;
 			width: 50px;
 			height: 50px;
-			border: 5px solid #ccc;
-			border-top-color: #007acc;
+			border: 5px solid var(--vscode-editorWidget-border, #ccc);
+			border-top-color: var(--vscode-progressBar-background, #007acc);
 			border-radius: 50%;
 			animation: spin 1s linear infinite;
 			}
@@ -47,172 +45,186 @@ function getLoadingView(): string {
 			}
 
 			h2 {
-			color: #333;
+			color: var(--vscode-editor-foreground, #333);
+			}
+
+			body.vscode-dark {
+			background-color: var(--vscode-editor-background, #1e1e1e);
+			}
+
+			body.vscode-light {
+			background-color: var(--vscode-editor-background, #ffffff);
 			}
 		</style>
 		</head>
-		<body>
+		<body class="">
 		<div class="loading-container">
 			<div class="spinner"></div>
 			<h2>Analyzing the code...</h2>
 		</div>
+
+		<script>
+			const body = document.body;
+			const theme = window.matchMedia('(prefers-color-scheme: dark)').matches
+			? 'vscode-dark'
+			: 'vscode-light';
+			body.classList.add(theme);
+		</script>
 		</body>
 		</html>`;
 		}
 
 
-function updateSuggestionPanel(suggestion: any, selectedText: string, context: vscode.ExtensionContext) {
+function updateSuggestionPanel(suggestion: any) {
   if (!suggestionPanel) return;
-
   suggestionPanel.webview.html = getWebviewContentWithReplace(suggestion);
+}
 
-  suggestionPanel.webview.onDidReceiveMessage(async message => {
-    if (message.command === 'replace') {
-      if (!lastSelection) {
-        vscode.window.showErrorMessage('No original selection stored to replace.');
+export function activate(context: vscode.ExtensionContext) {
+  const analyzeDisposable = vscode.commands.registerCommand(
+    'greencode.analyzeSelectedCode',
+    async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) return;
+
+      const selection = editor.selection;
+      const selectedText = editor.document.getText(selection);
+
+      if (!selectedText.trim()) {
+        vscode.window.showWarningMessage('No code selected.');
         return;
       }
 
-      const { uri, range } = lastSelection;
-      const document = await vscode.workspace.openTextDocument(uri);
-      const editor = vscode.window.visibleTextEditors.find(e => e.document.uri.toString() === uri.toString());
+      lastSelection = {
+        uri: editor.document.uri,
+        range: new vscode.Range(selection.start, selection.end)
+      };
 
-		if (!editor) {
-		vscode.window.showErrorMessage('Editor not visible. Please open the file to replace.');
-		return;
-		}
+      // REUSE PANEL IF EXISTS
+      if (suggestionPanel) {
+        suggestionPanel.reveal(vscode.ViewColumn.Beside, true);
+        suggestionPanel.webview.html = getLoadingView();
+      } else {
+        suggestionPanel = vscode.window.createWebviewPanel(
+          'greensageSuggestions',
+          'Green Suggestions',
+          vscode.ViewColumn.Beside,
+          {
+            enableScripts: true,
+            retainContextWhenHidden: true
+          }
+        );
+        suggestionPanel.webview.html = getLoadingView();
 
+        // Attach message handler once
+        suggestionPanel.webview.onDidReceiveMessage(async message => {
+          if (message.command === 'replace') {
+            if (!lastSelection) {
+              vscode.window.showErrorMessage('No original selection stored to replace.');
+              return;
+            }
 
-      editor.edit(editBuilder => {
-        editBuilder.replace(range, suggestion.suggested_code);
-      });
+            const { uri, range } = lastSelection;
+
+            const editor = vscode.window.visibleTextEditors.find(e => e.document.uri.toString() === uri.toString());
+
+            if (!editor) {
+              vscode.window.showErrorMessage('Editor not visible. Please open the file to replace.');
+              return;
+            }
+
+            editor.edit(editBuilder => {
+              editBuilder.replace(range, lastSuggestion?.suggested_code ?? '');
+            });
+          }
+        });
+
+        // Clear reference when closed
+        suggestionPanel.onDidDispose(() => {
+          suggestionPanel = null;
+        });
+      }
+
+      // Analyze code
+      const suggestion = await analyzeWithOpenAI(selectedText);
+      lastSuggestion = suggestion; // Save for use in replace
+      updateSuggestionPanel(suggestion);
     }
-  });
-}
-
-
-export function activate(context: vscode.ExtensionContext) {
-	const analyzeDisposable = vscode.commands.registerCommand(
-	'greencode.analyzeSelectedCode',
-	async () => {
-	const editor = vscode.window.activeTextEditor;
-	if (!editor) return;
-
-	const selection = editor.selection;
-	const selectedText = editor.document.getText(selection);
-
-	if (!selectedText.trim()) {
-		vscode.window.showWarningMessage('No code selected.');
-		return;
-	}
-
-	lastSelection = {
-		uri: editor.document.uri,
-		range: new vscode.Range(selection.start, selection.end)
-	};
-
-	// Step 1: Show panel immediately
-	suggestionPanel = vscode.window.createWebviewPanel(
-		'greensageSuggestions',
-		'Green Suggestions',
-		vscode.ViewColumn.Beside,
-		{
-		enableScripts: true,
-		retainContextWhenHidden: true
-		}
-	);
-	suggestionPanel.webview.html = getLoadingView(); // show analyzing...
-
-	// Step 2: Get suggestion from OpenAI
-	const suggestion = await analyzeWithOpenAI(selectedText);
-
-	// Step 3: Update the panel with suggestions
-	updateSuggestionPanel(suggestion, selectedText, context);
-	}
-	);
-
+  );
 
   context.subscriptions.push(analyzeDisposable);
 }
 
-function showSuggestionPanelWithReplace(
-  context: vscode.ExtensionContext,
-  suggestion: any,
-  selectedText: string
-) {
-  const panel = vscode.window.createWebviewPanel(
-    'greensageSuggestions',
-    'Green Suggestions',
-    vscode.ViewColumn.Beside,
-    {
-      enableScripts: true,
-      retainContextWhenHidden: true
-    }
-  );
-
-  panel.webview.html = getWebviewContentWithReplace(suggestion);
-
-  panel.webview.onDidReceiveMessage(async message => {
-    if (message.command === 'replace') {
-      if (!lastSelection) {
-        vscode.window.showErrorMessage(
-          'No original selection stored to replace.'
-        );
-        return;
-      }
-
-      const { uri, range } = lastSelection;
-
-      const document = await vscode.workspace.openTextDocument(uri);
-      const editor = await vscode.window.showTextDocument(document, {
-        preview: false,
-        preserveFocus: false
-      });
-
-      editor.edit(editBuilder => {
-        editBuilder.replace(range, suggestion.suggested_code);
-      });
-    }
-  });
-}
+let lastSuggestion: any = null; // store the latest suggestion for Replace button
 
 function getWebviewContentWithReplace(data: any): string {
   return `<!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <style>
-        body { font-family: sans-serif; padding: 1rem; }
-        pre { background: #f5f5f5; padding: 1rem; overflow-x: auto; }
-        button {
-          background-color: #007acc; color: white;
-          border: none; padding: 0.5rem 1rem;
-          margin-top: 1rem; cursor: pointer; border-radius: 4px;
-        }
-        h2 { margin-top: 2rem; }
-      </style>
-    </head>
-    <body>
-      <h2>🌱 Reason</h2>
-      <p>${data.reason}</p>
+		<html lang="en">
+		<head>
+		<meta charset="UTF-8">
+		<style>
+			body {
+			font-family: var(--vscode-editor-font-family, monospace);
+			font-size: var(--vscode-editor-font-size, 14px);
+			color: var(--vscode-editor-foreground);
+			background-color: var(--vscode-editor-background);
+			padding: 1rem;
+			}
 
-      <h2>🧾 Original Code</h2>
-      <pre>${escapeHtml(data.original_code)}</pre>
+			pre {
+			background-color: var(--vscode-editor-background);
+			color: var(--vscode-editor-foreground);
+			font-family: var(--vscode-editor-font-family, monospace);
+			font-size: var(--vscode-editor-font-size, 14px);
+			padding: 1rem;
+			border: 1px solid var(--vscode-editorWidget-border, #ccc);
+			border-radius: 5px;
+			overflow-x: auto;
+			}
 
-      <h2>✅ Suggested Code</h2>
-      <pre>${escapeHtml(data.suggested_code)}</pre>
+			button {
+			background-color: var(--vscode-button-background);
+			color: var(--vscode-button-foreground);
+			border: none;
+			padding: 0.5rem 1rem;
+			margin-top: 1rem;
+			cursor: pointer;
+			border-radius: 4px;
+			font-family: var(--vscode-editor-font-family);
+			}
 
-      <button onclick="replaceInEditor()">Replace in Editor</button>
+			button:hover {
+			background-color: var(--vscode-button-hoverBackground);
+			}
 
-      <script>
-        const vscode = acquireVsCodeApi();
-        function replaceInEditor() {
-          vscode.postMessage({ command: 'replace' });
-        }
-      </script>
-    </body>
-    </html>`;
-}
+			h2 {
+			margin-top: 2rem;
+			color: var(--vscode-editor-foreground);
+			}
+		</style>
+		</head>
+		<body>
+		<h2>🌱 Reason</h2>
+		<p>${escapeHtml(data.reason)}</p>
+
+		<h2>🧾 Original Code</h2>
+		<pre>${escapeHtml(data.original_code)}</pre>
+
+		<h2>✅ Suggested Code</h2>
+		<pre>${escapeHtml(data.suggested_code)}</pre>
+
+		<button onclick="replaceInEditor()">Replace in Editor</button>
+
+		<script>
+			const vscode = acquireVsCodeApi();
+			function replaceInEditor() {
+			vscode.postMessage({ command: 'replace' });
+			}
+		</script>
+		</body>
+		</html>`;
+		}
+
 
 function escapeHtml(text: string): string {
   return text
@@ -241,17 +253,29 @@ async function analyzeWithOpenAI(code: string): Promise<any> {
     body: JSON.stringify({
       model: 'gpt-4.1-mini',
       messages: [
-        {
-          role: 'system',
-          content:
-            "You're a sustainable coding assistant. Reply only in JSON format containing keys: original_code, suggested_code, and reason. No explanation outside the JSON object."
-        },
-        {
-          role: 'user',
-          content: `Analyze the following code for sustainability and suggest improvements. Return a JSON object:\n\n${code}`
-        }
-      ],
-      temperature: 0.3
+				{
+				role: 'system',
+				content: `
+				You are GreenSage, an intelligent, sustainability-focused coding assistant. Your mission is to suggest code improvements that are not only correct and efficient, but also **environmentally responsible**, adhering to the Green Software Foundation’s principles:
+				- **Minimize carbon emissions** through software—abate rather than offset.
+				- Optimize for **energy efficiency**, **carbon awareness**, and **hardware efficiency**.
+				- Use measurable metrics: account for energy consumption (E), carbon intensity (I), embodied emissions (M), per functional unit (R), i.e., SCI = (E * I) + M per R.
+				- Suggest practical patterns or optimizations (e.g., algorithmic improvements, lazy loading, caching, efficient data structures) that align with GSF’s green software patterns and standards.
+				- Promote measurable, transparent improvements using existing SCI frameworks and Carbon Aware SDKs when possible.
+
+				Respond **only in JSON** with keys:
+				- "original_code": the unmodified snippet,
+				- "suggested_code": improved version addressing sustainability and correctness,
+				- "reason": articulate how your suggestion reduces energy or carbon and aligns with GSF principles.
+
+				No other text outside the JSON.`
+				},
+				{
+					role: 'user',
+					content: `Analyze the following code for sustainable improvements, emphasizing energy efficiency, carbon awareness, and using GSF-aligned strategies:\n\n${code}\n\nReturn a JSON object.`
+				}
+	],
+	temperature: 0.3
     })
   });
 
@@ -273,8 +297,7 @@ async function analyzeWithOpenAI(code: string): Promise<any> {
     parsed = {
       original_code: code,
       suggested_code: code,
-      reason:
-        '⚠️ Could not parse AI response as JSON. Check prompt or model output.'
+      reason: '⚠️ Could not parse AI response as JSON. Check prompt or model output.'
     };
   }
 
