@@ -14,31 +14,52 @@ let lastSelection: {
 
 function getLoadingView(): string {
   return `<!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <style>
-        body { font-family: sans-serif; padding: 2rem; color: #444; }
-        .spinner {
-          margin-top: 2rem;
-          width: 40px;
-          height: 40px;
-          border: 5px solid #ccc;
-          border-top-color: #007acc;
-          border-radius: 50%;
-          animation: spin 1s linear infinite;
-        }
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-      </style>
-    </head>
-    <body>
-      <h2>🔍 Analyzing Selected Code...</h2>
-      <div class="spinner"></div>
-    </body>
-    </html>`;
-}
+		<html lang="en">
+		<head>
+		<meta charset="UTF-8">
+		<style>
+			html, body {
+			height: 100%;
+			margin: 0;
+			display: flex;
+			justify-content: center;
+			align-items: center;
+			font-family: sans-serif;
+			background-color: #ffffff;
+			}
+
+			.loading-container {
+			text-align: center;
+			}
+
+			.spinner {
+			margin: 0 auto 20px;
+			width: 50px;
+			height: 50px;
+			border: 5px solid #ccc;
+			border-top-color: #007acc;
+			border-radius: 50%;
+			animation: spin 1s linear infinite;
+			}
+
+			@keyframes spin {
+			to { transform: rotate(360deg); }
+			}
+
+			h2 {
+			color: #333;
+			}
+		</style>
+		</head>
+		<body>
+		<div class="loading-container">
+			<div class="spinner"></div>
+			<h2>Analyzing the code...</h2>
+		</div>
+		</body>
+		</html>`;
+		}
+
 
 function updateSuggestionPanel(suggestion: any, selectedText: string, context: vscode.ExtensionContext) {
   if (!suggestionPanel) return;
@@ -54,10 +75,13 @@ function updateSuggestionPanel(suggestion: any, selectedText: string, context: v
 
       const { uri, range } = lastSelection;
       const document = await vscode.workspace.openTextDocument(uri);
-      const editor = await vscode.window.showTextDocument(document, {
-        preview: false,
-        preserveFocus: false
-      });
+      const editor = vscode.window.visibleTextEditors.find(e => e.document.uri.toString() === uri.toString());
+
+		if (!editor) {
+		vscode.window.showErrorMessage('Editor not visible. Please open the file to replace.');
+		return;
+		}
+
 
       editor.edit(editBuilder => {
         editBuilder.replace(range, suggestion.suggested_code);
@@ -215,7 +239,7 @@ async function analyzeWithOpenAI(code: string): Promise<any> {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: 'gpt-4',
+      model: 'gpt-4.1-mini',
       messages: [
         {
           role: 'system',
